@@ -1,50 +1,36 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 
-import { type Cart, money, type Product } from "@/lib/types";
-import { getUserId } from "@/lib/user";
+import { ProductArt } from "@/components/ProductArt";
+import { QuantityStepper } from "@/components/QuantityStepper";
+import { useCart } from "@/lib/cart-context";
+import { money } from "@/lib/types";
 
 export default function CartPage() {
   const router = useRouter();
-  const [cart, setCart] = useState<Cart | null>(null);
-  const [products, setProducts] = useState<Product[]>([]);
+  const { cart, cartError, products, setQuantity, clear } = useCart();
   const [email, setEmail] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [placing, setPlacing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    Promise.all([
-      fetch(`/api/cart/${getUserId()}`).then((r) => r.json()),
-      fetch("/api/products").then((r) => r.json()),
-    ])
-      .then(([c, p]) => {
-        setCart(c);
-        setProducts(p);
-      })
-      .catch(() => setError("Couldn't load your cart."));
-  }, []);
 
   const lines = useMemo(
     () =>
       (cart?.items ?? []).map((item) => ({
         ...item,
-        product: products.find((p) => p.id === item.product_id),
+        product: products?.find((p) => p.id === item.product_id),
       })),
     [cart, products],
   );
-  // Shown for convenience only. The order service recalculates the total from the product service.
-  const estimate = lines.reduce((sum, l) => sum + (l.product?.price_cents ?? 0) * l.quantity, 0);
+  // For display only. order-service recalculates every price from product-service.
+  const subtotal = lines.reduce((sum, l) => sum + (l.product?.price_cents ?? 0) * l.quantity, 0);
+  const count = lines.reduce((sum, l) => sum + l.quantity, 0);
 
-  async function remove(productId: number) {
-    const res = await fetch(`/api/cart/${getUserId()}/items/${productId}`, { method: "DELETE" });
-    if (res.ok) setCart(await res.json());
-  }
-
-  async function checkout(e: React.FormEvent) {
+  async function placeOrder(e: React.FormEvent) {
     e.preventDefault();
-    setBusy(true);
+    setPlacing(true);
     setError(null);
     const res = await fetch("/api/orders", {
       method: "POST",
@@ -52,69 +38,131 @@ export default function CartPage() {
         customerEmail: email,
         items: lines.map((l) => ({ productId: l.product_id, quantity: l.quantity })),
       }),
-    });
-    if (!res.ok) {
-      const problem = await res.json().catch(() => ({}));
-      setError(problem.detail ?? `Checkout failed (${res.status}).`);
-      setBusy(false);
+    }).catch(() => null);
+
+    if (!res || !res.ok) {
+      const problem = res ? await res.json().catch(() => ({})) : {};
+      setError(
+        res?.status === 503
+          ? "Orders can't be placed right now because a service is unavailable. Try again in a minute."
+          : (problem.detail ?? "Your order couldn't be placed. Check your cart and try again."),
+      );
+      setPlacing(false);
       return;
     }
     const order = await res.json();
-    await fetch(`/api/cart/${getUserId()}`, { method: "DELETE" });
+    await clear();
     router.push(`/orders/${order.id}`);
   }
 
-  if (!cart) return <p className="muted">{error ?? "Loading…"}</p>;
-  if (!lines.length) return <p className="muted">Your cart is empty.</p>;
+  if (!cart && cartError) {
+    return (
+      <div className="empty">
+        <h1>Your cart isn&apos;t available.</h1>
+        <p>The cart service isn&apos;t responding. Check that cart-service is running, then refresh.</p>
+      </div>
+    );
+  }
+  if (!cart) return <div className="cart cart--skeleton" aria-busy="true" />;
+
+  if (!lines.length) {
+    return (
+      <div className="empty">
+        <h1>Your cart is empty.</h1>
+        <p>Add something from the range and it&apos;ll appear here.</p>
+        <Link href="/" className="btn">
+          Browse the range
+        </Link>
+      </div>
+    );
+  }
 
   return (
-    <>
-      <h1>Cart</h1>
-      <div className="panel">
-        <table>
-          <thead>
-            <tr>
-              <th>Product</th>
-              <th className="num">Qty</th>
-              <th className="num">Price</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {lines.map((l) => (
-              <tr key={l.product_id}>
-                <td>{l.product?.name ?? `Product ${l.product_id}`}</td>
-                <td className="num">{l.quantity}</td>
-                <td className="num">{l.product ? money(l.product.price_cents * l.quantity) : "—"}</td>
-                <td className="num">
-                  <button className="ghost" onClick={() => remove(l.product_id)}>
-                    Remove
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        <p className="num" style={{ textAlign: "right" }}>
-          Estimated total: <strong>{money(estimate)}</strong>
-        </p>
-        <form className="row" onSubmit={checkout}>
+    <div className="cart">
+      <section className="cart__lines" aria-labelledby="cart-title">
+        <h1 id="cart-title">Your cart</h1>
+        <ul className="lines">
+          {lines.map((l) => (
+            <li key={l.product_id} className="line">
+              <Link
+                href={`/products/${l.product_id}`}
+                className="line__art"
+                data-category={l.product?.category}
+                tabIndex={-1}
+                aria-hidden="true"
+              >
+                {l.product && <ProductArt sku={l.product.sku} />}
+              </Link>
+              <div className="line__info">
+                <Link href={`/products/${l.product_id}`} className="line__name">
+                  {l.product?.name ?? `Product ${l.product_id}`}
+                </Link>
+                {l.product && <span className="muted">{money(l.product.price_cents)} each</span>}
+              </div>
+              {l.product && (
+                <QuantityStepper
+                  value={l.quantity}
+                  min={1}
+                  onChange={(q) => l.product && setQuantity(l.product, q)}
+                  label={`Quantity of ${l.product.name}`}
+                />
+              )}
+              <span className="line__total price">
+                {l.product ? money(l.product.price_cents * l.quantity) : "—"}
+              </span>
+              <button
+                className="link-button"
+                onClick={() => l.product && setQuantity(l.product, 0)}
+                aria-label={`Remove ${l.product?.name ?? "item"} from cart`}
+              >
+                Remove
+              </button>
+            </li>
+          ))}
+        </ul>
+      </section>
+
+      <aside className="summary" aria-labelledby="summary-title">
+        <h2 id="summary-title">Order summary</h2>
+        <dl>
+          <div>
+            <dt>Items</dt>
+            <dd>{count}</dd>
+          </div>
+          <div>
+            <dt>Delivery</dt>
+            <dd>Free</dd>
+          </div>
+          <div className="summary__total">
+            <dt>Total</dt>
+            <dd className="price">{money(subtotal)}</dd>
+          </div>
+        </dl>
+        <form onSubmit={placeOrder}>
+          <label htmlFor="email">Email for your receipt</label>
           <input
+            id="email"
             type="email"
             required
-            placeholder="Email for your receipt"
+            autoComplete="email"
+            placeholder="you@example.com"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
           />
-          <button type="submit" disabled={busy}>
-            {busy ? "Placing…" : "Place order"}
+          <button type="submit" className="btn btn--block" disabled={placing}>
+            {placing ? "Placing order…" : "Place order"}
           </button>
+          {error && (
+            <p className="notice notice--error" role="alert">
+              {error}
+            </p>
+          )}
         </form>
-        <p className="muted" style={{ fontSize: 13 }}>
-          Tip: use an address containing <code>+decline</code> to see a failed payment.
+        <p className="muted small">
+          Payment is simulated. To see a declined payment, use an email address containing{" "}
+          <code>+decline</code>.
         </p>
-        {error && <p className="error">{error}</p>}
-      </div>
-    </>
+      </aside>
+    </div>
   );
 }
