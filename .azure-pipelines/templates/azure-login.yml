@@ -1,0 +1,10 @@
+# Signs in as the agent VM's managed identity. Azure DevOps stores no Azure credential.
+steps:
+  - bash: |
+      set -euo pipefail
+      az login --identity --output none
+      acr=$(az acr list -g "$(platformResourceGroup)" --query "[0].name" -o tsv)
+      [ -n "$acr" ] || { echo "No container registry in $(platformResourceGroup)"; exit 1; }
+      echo "##vso[task.setvariable variable=ACR]$acr"
+      echo "Registry: $acr"
+    displayName: Azure sign-in (managed identity)

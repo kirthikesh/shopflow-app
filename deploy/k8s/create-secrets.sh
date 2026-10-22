@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Creates the shopflow-secrets Kubernetes secret. Values never touch git.
 #   POSTGRES_PASSWORD             generated once, then kept (changing it would lock out the existing database)
-#   SERVICEBUS_CONNECTION_STRING  read from the shopflow-infra Terraform outputs on every run
+#   SERVICEBUS_CONNECTION_STRING  taken from the environment if set (the pipeline does this),
+#                                 otherwise read from the shopflow-infra Terraform outputs
 # Phase 7 replaces this with Key Vault + Workload Identity.
 set -euo pipefail
 
@@ -10,7 +11,7 @@ NS=shopflow
 
 kubectl get namespace "$NS" >/dev/null 2>&1 || kubectl create namespace "$NS"
 
-SB_CONN=$(terraform -chdir="$INFRA_DIR/envs/dev" output -raw servicebus_connection_string)
+SB_CONN="${SERVICEBUS_CONNECTION_STRING:-$(terraform -chdir="$INFRA_DIR/envs/dev" output -raw servicebus_connection_string)}"
 
 if PG_PASS=$(kubectl -n "$NS" get secret shopflow-secrets -o jsonpath='{.data.POSTGRES_PASSWORD}' 2>/dev/null) && [ -n "$PG_PASS" ]; then
   PG_PASS=$(printf '%s' "$PG_PASS" | base64 --decode)

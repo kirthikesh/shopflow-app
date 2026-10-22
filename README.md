@@ -7,6 +7,7 @@
 ![Next.js](https://img.shields.io/badge/Next.js-16-111?style=flat-square&logo=nextdotjs&logoColor=white)
 ![Azure](https://img.shields.io/badge/Azure-Service_Bus-111?style=flat-square&logo=microsoftazure&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-Compose-111?style=flat-square&logo=docker&logoColor=white)
+![Azure DevOps](https://img.shields.io/badge/Azure_DevOps-Pipelines-111?style=flat-square&logo=azuredevops&logoColor=white)
 
 An event-driven microservices store, built as the application layer of an enterprise
 platform on **Azure**: private AKS, Terraform landing zone, Azure DevOps pipelines, GitOps,
@@ -15,7 +16,7 @@ policy-as-code and full observability.
 This repository holds the **application**: six services in five languages, plus a local stack
 that runs the whole system on a laptop, including Azure Service Bus (through the official emulator).
 
-> **Status:** Phase 1 of 10 complete. See the [roadmap](#roadmap).
+> **Status:** Phases 1–5 of 10 complete. See the [roadmap](#roadmap). Infrastructure lives in [shopflow-infra](https://github.com/kirthikesh/shopflow-infra).
 
 ---
 
@@ -99,6 +100,34 @@ make test               # everything
 make test-order         # one service
 ```
 
+## CI/CD
+
+[`azure-pipelines.yml`](azure-pipelines.yml) runs in Azure DevOps on a self-hosted agent inside the
+Azure hub network, and signs in to Azure as that VM's managed identity. No Azure credential is stored
+in Azure DevOps.
+
+```mermaid
+flowchart LR
+    PR([pull request]) --> T
+    MAIN([push to main]) --> T
+    T[Test<br/>6 services, each in<br/>its own toolchain container] --> B[Build + Trivy scan<br/>SBOM per image]
+    B -->|main only| P[(Push to ACR<br/>tag = commit SHA)]
+    P --> A{Approval<br/>shopflow-dev}
+    A --> D[Deploy to AKS<br/>kustomize, image pinned to commit]
+    D --> S[Smoke test<br/>/api/health, /api/products]
+```
+
+| Stage | What it checks |
+|---|---|
+| Test | ruff and pytest (Python), Maven tests (Java), `go vet` and `go test`, Node tests, Next.js type check and production build |
+| Build | Each image is scanned with Trivy. The build **fails on any CRITICAL vulnerability that has a fix**; every HIGH and CRITICAL finding is published to the Tests tab, and a CycloneDX SBOM per image is kept as a build artifact |
+| Push | Only from `main`. Pull requests build and scan but never publish an image |
+| Deploy | Waits for approval on the `shopflow-dev` environment. Skipped automatically when the cluster is switched off to save money |
+| Smoke test | Waits for the public IP, then calls the shop's health endpoint and product API through the real load balancer |
+
+Templates live in [`.azure-pipelines/templates`](.azure-pipelines/templates): one for the
+managed-identity sign-in and one for build, scan, SBOM and push, reused for all six services.
+
 ## Design decisions
 
 - **Database per service.** The product and order services each own a database; nothing reads another service's tables.
@@ -112,8 +141,11 @@ make test-order         # one service
 
 ```
 shopflow-app/
+├── azure-pipelines.yml       CI/CD (Azure DevOps)
+├── .azure-pipelines/templates/
 ├── docker-compose.yml        local stack
-├── Makefile                  make up / test / logs
+├── Makefile                  make up / test / deploy
+├── deploy/k8s/               Kustomize base and dev overlay
 ├── local/
 │   ├── postgres/init.sql     creates one database per service
 │   └── servicebus/config.json  queue, topic and subscriptions for the emulator
@@ -126,17 +158,18 @@ shopflow-app/
     └── notification-service/
 ```
 
-Related repositories (coming in later phases):
-- `shopflow-infra`: Terraform landing zone and Ansible
-- `shopflow-gitops`: Helm charts and environment config
+Related repositories:
+- [`shopflow-infra`](https://github.com/kirthikesh/shopflow-infra): Terraform landing zone, Ansible, infrastructure pipeline
+- `shopflow-gitops` (Phase 6): Helm charts and environment config
 
 ## Roadmap
 
 - [x] **Phase 1:** Six services, Dockerfiles, local stack with the Service Bus emulator
-- [ ] **Phase 2:** Terraform landing zone: hub-spoke network, private endpoints, remote state
-- [ ] **Phase 3:** Private AKS, ingress, cert-manager, Workload Identity
-- [ ] **Phase 4:** Ansible: bastion and self-hosted build agents
-- [ ] **Phase 5:** Azure DevOps CI: pipeline templates, scanning, image signing
+- [x] **Phase 2:** Terraform landing zone: hub-spoke network, private DNS, remote state, guardrails
+- [x] **Phase 3:** AKS with Workload Identity, Cilium and Entra ID RBAC; Kustomize manifests; real Service Bus
+- [x] **Phase 4:** Ansible: hardened jump box and self-hosted Azure DevOps agent
+- [x] **Phase 5:** Azure DevOps pipelines: templates, Trivy scanning, SBOMs, approvals, managed-identity auth
+- [ ] Still to come from Phases 3–5: private API server, ingress with cert-manager, image signing
 - [ ] **Phase 6:** GitOps CD: multiple environments, canary releases
 - [ ] **Phase 7:** Security: Key Vault, Kyverno, Defender for Containers, Azure Policy
 - [ ] **Phase 8:** Observability: OpenTelemetry tracing, Grafana, SLOs, alerting

@@ -1,0 +1,188 @@
+# ShopFlow application pipeline.
+#
+#   Pull request  ->  Test  ->  Build + scan (nothing is pushed)
+#   main          ->  Test  ->  Build + scan + push  ->  approval  ->  Deploy to AKS  ->  smoke test
+#
+# Runs on the self-hosted agent in the hub network and signs in to Azure with the
+# agent VM's managed identity. Images are tagged with the commit they were built
+# from, so every running pod can be traced back to its code.
+
+trigger:
+  branches:
+    include: [main]
+  paths:
+    include: [services, deploy, azure-pipelines.yml, .azure-pipelines]
+
+pr:
+  branches:
+    include: [main]
+  paths:
+    include: [services, deploy, azure-pipelines.yml, .azure-pipelines]
+
+parameters:
+  - name: services
+    type: object
+    default:
+      - { name: product-service,      test: test-product }
+      - { name: cart-service,         test: test-cart }
+      - { name: order-service,        test: test-order }
+      - { name: payment-service,      test: test-payment }
+      - { name: notification-service, test: test-notification }
+      - { name: frontend,             test: test-frontend }
+
+pool:
+  name: Default
+
+variables:
+  platformResourceGroup: rg-shopflow-platform-neu
+  devResourceGroup: rg-shopflow-dev-neu
+  isMain: $[ and(eq(variables['Build.SourceBranch'], 'refs/heads/main'), ne(variables['Build.Reason'], 'PullRequest')) ]
+
+stages:
+  # ---------------------------------------------------------------------------
+  - stage: Test
+    jobs:
+      - job: test
+        displayName: Unit tests and linting
+        timeoutInMinutes: 30
+        workspace:
+          clean: all
+        steps:
+          - checkout: self
+            clean: true
+
+          # Each service is tested in its own language's container (see Makefile),
+          # so the agent needs Docker and nothing else.
+          - ${{ each svc in parameters.services }}:
+              - bash: make ${{ svc.test }}
+                displayName: ${{ svc.name }}
+
+          # Test containers run as root and leave root-owned files in the
+          # workspace; hand them back to the agent user so the next run can clean up.
+          - bash: docker run --rm -v "$(Build.SourcesDirectory):/w" alpine:3 chown -R "$(id -u):$(id -g)" /w
+            displayName: Reset workspace ownership
+            condition: always()
+
+  # ---------------------------------------------------------------------------
+  - stage: Build
+    dependsOn: Test
+    jobs:
+      - job: build
+        displayName: Build, scan and push images
+        timeoutInMinutes: 60
+        workspace:
+          clean: all
+        steps:
+          - checkout: self
+            clean: true
+
+          - template: .azure-pipelines/templates/azure-login.yml
+
+          - bash: |
+              set -euo pipefail
+              tag="${BUILD_SOURCEVERSION:0:7}"
+              echo "##vso[task.setvariable variable=imageTag]$tag"
+              echo "##vso[build.addbuildtag]$tag"
+              echo "Image tag: $tag"
+            displayName: Image tag from commit
+
+          - bash: az acr login --name "$(ACR)"
+            displayName: Registry login
+            condition: and(succeeded(), eq(variables.isMain, true))
+
+          - ${{ each svc in parameters.services }}:
+              - template: .azure-pipelines/templates/build-image.yml
+                parameters:
+                  service: ${{ svc.name }}
+                  push: ${{ eq(variables['Build.SourceBranch'], 'refs/heads/main') }}
+
+          - task: PublishTestResults@2
+            displayName: Publish scan results
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFormat: JUnit
+              testResultsFiles: $(Build.ArtifactStagingDirectory)/trivy-*.xml
+              testRunTitle: Trivy image scan
+              failTaskOnFailedTests: false
+
+          - publish: $(Build.ArtifactStagingDirectory)/sbom
+            artifact: sbom
+            displayName: Publish SBOMs
+            condition: succeededOrFailed()
+
+          - bash: docker image prune --force --filter "until=72h"
+            displayName: Prune old images
+            condition: always()
+
+  # ---------------------------------------------------------------------------
+  # main only. Skipped quietly when the cluster is switched off (make aks-down).
+  - stage: Deploy
+    dependsOn: Build
+    condition: and(succeeded(), eq(variables.isMain, true))
+    jobs:
+      - job: find_cluster
+        displayName: Is the cluster up?
+        steps:
+          - checkout: none
+          - bash: |
+              set -euo pipefail
+              az login --identity --output none
+              aks=$(az aks list -g "$(devResourceGroup)" --query "[0].name" -o tsv 2>/dev/null || true)
+              echo "##vso[task.setvariable variable=name;isOutput=true]$aks"
+              [ -n "$aks" ] && echo "Cluster: $aks" || echo "No cluster running: skipping deployment."
+            name: aks
+            displayName: Look for the AKS cluster
+
+      - deployment: deploy_dev
+        displayName: Deploy to dev
+        dependsOn: find_cluster
+        condition: and(succeeded(), ne(dependencies.find_cluster.outputs['aks.name'], ''))
+        environment: shopflow-dev
+        variables:
+          aksName: $[ dependencies.find_cluster.outputs['aks.name'] ]
+        workspace:
+          clean: all
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                  clean: true
+
+                - template: .azure-pipelines/templates/azure-login.yml
+
+                - bash: |
+                    set -euo pipefail
+                    export KUBECONFIG="$(Agent.TempDirectory)/kubeconfig"
+                    az aks get-credentials -g "$(devResourceGroup)" -n "$(aksName)" --file "$KUBECONFIG" --overwrite-existing
+                    kubelogin convert-kubeconfig -l msi
+
+                    ns=$(az servicebus namespace list -g "$(devResourceGroup)" --query "[0].name" -o tsv)
+                    export SERVICEBUS_CONNECTION_STRING=$(az servicebus namespace authorization-rule keys list \
+                      -g "$(devResourceGroup)" --namespace-name "$ns" -n shopflow-app --query primaryConnectionString -o tsv)
+
+                    make deploy ACR="$(ACR)" TAG="${BUILD_SOURCEVERSION:0:7}"
+                  displayName: Deploy (kustomize, pinned to this commit)
+
+                - bash: |
+                    set -euo pipefail
+                    export KUBECONFIG="$(Agent.TempDirectory)/kubeconfig"
+                    for _ in $(seq 1 30); do
+                      ip=$(kubectl -n shopflow get svc frontend-public -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+                      [ -n "$ip" ] && break
+                      sleep 10
+                    done
+                    [ -n "${ip:-}" ] || { echo "The shop never got a public IP"; exit 1; }
+
+                    curl -fsS --retry 12 --retry-delay 5 --retry-all-errors "http://$ip/api/health"; echo
+                    products=$(curl -fsS --retry 6 --retry-delay 5 --retry-all-errors "http://$ip/api/products" | jq length)
+                    [ "$products" -gt 0 ] || { echo "Product API returned no products"; exit 1; }
+                    echo "Smoke test passed: $products products at http://$ip"
+                    echo "##vso[task.setvariable variable=shopUrl]http://$ip"
+                  displayName: Smoke test
+
+                - bash: kubectl -n shopflow get pods -o wide
+                  displayName: Pod status
+                  condition: always()
+                  env:
+                    KUBECONFIG: $(Agent.TempDirectory)/kubeconfig

@@ -1,0 +1,42 @@
+# Builds one service image, scans it, writes its SBOM and, on main, pushes it.
+#
+#   Gate     fails on CRITICAL vulnerabilities that have a fix available
+#   Report   every HIGH and CRITICAL finding goes to the Tests tab
+#   SBOM     CycloneDX, published as a build artifact
+parameters:
+  - name: service
+    type: string
+  - name: push
+    type: boolean
+
+steps:
+  - bash: |
+      set -euo pipefail
+      image="$(ACR).azurecr.io/shopflow/${{ parameters.service }}"
+      docker build --pull \
+        --label org.opencontainers.image.source="$(Build.Repository.Uri)" \
+        --label org.opencontainers.image.revision="$(Build.SourceVersion)" \
+        -t "$image:$(imageTag)" -t "$image:latest" \
+        services/${{ parameters.service }}
+    displayName: ${{ parameters.service }} · build
+
+  - bash: |
+      set -euo pipefail
+      image="$(ACR).azurecr.io/shopflow/${{ parameters.service }}:$(imageTag)"
+      out="$(Build.ArtifactStagingDirectory)"
+      mkdir -p "$out/sbom"
+      junit=$(dpkg -L trivy | grep 'junit.tpl$')
+
+      trivy image --quiet --scanners vuln --severity HIGH,CRITICAL \
+        --format template --template "@$junit" -o "$out/trivy-${{ parameters.service }}.xml" "$image"
+      trivy image --quiet --format cyclonedx -o "$out/sbom/${{ parameters.service }}.cdx.json" "$image"
+
+      trivy image --quiet --scanners vuln --severity HIGH,CRITICAL "$image"
+      trivy image --quiet --scanners vuln --severity CRITICAL --ignore-unfixed --exit-code 1 "$image"
+    displayName: ${{ parameters.service }} · Trivy scan and SBOM
+
+  - ${{ if eq(parameters.push, true) }}:
+      - bash: |
+          set -euo pipefail
+          docker push --all-tags "$(ACR).azurecr.io/shopflow/${{ parameters.service }}"
+        displayName: ${{ parameters.service }} · push
