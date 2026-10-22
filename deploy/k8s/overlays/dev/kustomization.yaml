@@ -1,0 +1,28 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: shopflow
+
+resources:
+- ../../base
+
+# `make deploy` rewrites these with your registry and the current git commit,
+# so every deployment is traceable to the exact code it runs.
+images:
+- name: shopflow/cart-service
+  newName: acrshopflow0q6q39.azurecr.io/shopflow/cart-service
+  newTag: 499ec42
+- name: shopflow/frontend
+  newName: acrshopflow0q6q39.azurecr.io/shopflow/frontend
+  newTag: 499ec42
+- name: shopflow/notification-service
+  newName: acrshopflow0q6q39.azurecr.io/shopflow/notification-service
+  newTag: 499ec42
+- name: shopflow/order-service
+  newName: acrshopflow0q6q39.azurecr.io/shopflow/order-service
+  newTag: 499ec42
+- name: shopflow/payment-service
+  newName: acrshopflow0q6q39.azurecr.io/shopflow/payment-service
+  newTag: 499ec42
+- name: shopflow/product-service
+  newName: acrshopflow0q6q39.azurecr.io/shopflow/product-service
+  newTag: 499ec42
