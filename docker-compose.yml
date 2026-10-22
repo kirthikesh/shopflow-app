@@ -1,0 +1,135 @@
+# ShopFlow — full local stack.
+#   make up      build and start everything
+#   make down    stop everything (add -v via `make clean` to also delete data)
+#
+# Ports on your Mac:
+#   3000 frontend   8001 product   8002 cart   8080 order
+#   8083 payment    8084 notification   8025 Mailpit (email inbox)
+
+name: shopflow
+
+x-servicebus-env: &servicebus-env
+  # Static, publicly documented emulator credentials. Not a real secret.
+  SERVICEBUS_CONNECTION_STRING: "Endpoint=sb://servicebus-emulator;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;"
+
+services:
+  # ---------- infrastructure ----------
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: shopflow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-shopflow}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./local/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shopflow"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # The Service Bus emulator stores its state in SQL Server.
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    platform: linux/amd64   # runs through Rosetta on Apple Silicon
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:-ShopFlow_Local_2026!}
+
+  servicebus-emulator:
+    image: mcr.microsoft.com/azure-messaging/servicebus-emulator:latest
+    environment:
+      SQL_SERVER: mssql
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:-ShopFlow_Local_2026!}
+      ACCEPT_EULA: "Y"
+    volumes:
+      - ./local/servicebus/config.json:/ServiceBus_Emulator/ConfigFiles/Config.json:ro
+    depends_on:
+      - mssql
+
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      - "8025:8025"   # web inbox
+
+  # ---------- application ----------
+  product-service:
+    build: ./services/product-service
+    environment:
+      DATABASE_URL: postgresql+psycopg://shopflow:${POSTGRES_PASSWORD:-shopflow}@postgres:5432/products
+    ports: ["8001:8000"]
+    depends_on:
+      postgres: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready')"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  cart-service:
+    build: ./services/cart-service
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    ports: ["8002:8000"]
+    depends_on:
+      redis: { condition: service_healthy }
+
+  order-service:
+    build: ./services/order-service
+    environment:
+      <<: *servicebus-env
+      DATABASE_URL: jdbc:postgresql://postgres:5432/orders
+      DATABASE_USER: shopflow
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD:-shopflow}
+      PRODUCT_SERVICE_URL: http://product-service:8000
+      MESSAGING_ENABLED: "true"
+    ports: ["8080:8080"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      product-service: { condition: service_healthy }
+      servicebus-emulator: { condition: service_started }
+    restart: on-failure
+
+  payment-service:
+    build: ./services/payment-service
+    environment:
+      <<: *servicebus-env
+    ports: ["8083:8083"]
+    depends_on:
+      - servicebus-emulator
+    restart: on-failure
+
+  notification-service:
+    build: ./services/notification-service
+    environment:
+      <<: *servicebus-env
+      SMTP_HOST: mailpit
+      SMTP_PORT: "1025"
+    ports: ["8084:8084"]
+    depends_on:
+      - servicebus-emulator
+      - mailpit
+    restart: on-failure
+
+  frontend:
+    build: ./services/frontend
+    environment:
+      PRODUCT_SERVICE_URL: http://product-service:8000
+      CART_SERVICE_URL: http://cart-service:8000
+      ORDER_SERVICE_URL: http://order-service:8080
+    ports: ["3000:3000"]
+    depends_on:
+      - product-service
+      - cart-service
+      - order-service
+
+volumes:
+  postgres-data:

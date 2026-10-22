@@ -1,0 +1,30 @@
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
+*.iml
+
+# Local env files (keep .env.example)
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.db
+
+# Node / Next.js
+node_modules/
+.next/
+next-env.d.ts
+*.tsbuildinfo
+
+# Java
+target/
+
+# Go
+/services/payment-service/payment-service

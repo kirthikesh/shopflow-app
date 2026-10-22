@@ -1,0 +1,40 @@
+server:
+  port: 8080
+  shutdown: graceful
+
+spring:
+  application:
+    name: order-service
+  datasource:
+    url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/orders}
+    username: ${DATABASE_USER:shopflow}
+    password: ${DATABASE_PASSWORD:shopflow}
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate   # Flyway owns the schema; Hibernate only checks it
+  mvc:
+    problemdetails:
+      enabled: true
+
+management:
+  endpoints:
+    web:
+      base-path: /
+      exposure:
+        include: health,prometheus
+      path-mapping:
+        prometheus: metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true   # /health/liveness and /health/readiness for Kubernetes
+
+shopflow:
+  product-service-url: ${PRODUCT_SERVICE_URL:http://localhost:8001}
+  messaging:
+    enabled: ${MESSAGING_ENABLED:false}
+    connection-string: ${SERVICEBUS_CONNECTION_STRING:}
+    order-created-queue: order-created
+    payment-events-topic: payment-events
+    payment-events-subscription: order-service
