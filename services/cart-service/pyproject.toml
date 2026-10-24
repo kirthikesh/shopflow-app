@@ -1,0 +1,4 @@
+# Run tests from the service root so `import app` resolves, as it does in the container.
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
