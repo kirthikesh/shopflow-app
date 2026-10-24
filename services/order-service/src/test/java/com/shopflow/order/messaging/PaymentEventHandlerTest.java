@@ -5,19 +5,18 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.shopflow.order.service.OrderService;
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import tools.jackson.databind.json.JsonMapper;
 
 class PaymentEventHandlerTest {
 
     private final OrderService orderService = mock(OrderService.class);
     private final PaymentEventHandler handler =
-            new PaymentEventHandler(new ObjectMapper().registerModule(new JavaTimeModule()), orderService);
+            new PaymentEventHandler(JsonMapper.builder().build(), orderService); // java.time is built into Jackson 3
 
     @Test
     void parsesTheJsonThePaymentServiceSends() {

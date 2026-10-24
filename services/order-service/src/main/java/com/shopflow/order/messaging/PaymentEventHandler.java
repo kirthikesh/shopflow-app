@@ -1,8 +1,8 @@
 package com.shopflow.order.messaging;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.shopflow.order.service.OrderService;
-import java.io.IOException;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Component;
 
 /** Turns a raw Service Bus message body into a domain call. Kept separate so it is easy to test. */
@@ -21,7 +21,7 @@ public class PaymentEventHandler {
         PaymentProcessedEvent event;
         try {
             event = objectMapper.readValue(body, PaymentProcessedEvent.class);
-        } catch (IOException e) {
+        } catch (JacksonException e) {
             // A message we cannot parse will never succeed: fail loudly so it is dead-lettered.
             throw new IllegalArgumentException("invalid PaymentProcessed message", e);
         }

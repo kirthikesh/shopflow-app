@@ -14,13 +14,13 @@ public class HttpProductClient implements ProductClient {
 
     private final RestClient restClient;
 
-    public HttpProductClient(
-            RestClient.Builder builder,
-            @Value("${shopflow.product-service-url}") String baseUrl) {
+    public HttpProductClient(@Value("${shopflow.product-service-url}") String baseUrl) {
         SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
         requestFactory.setConnectTimeout(Duration.ofSeconds(2));
         requestFactory.setReadTimeout(Duration.ofSeconds(3));
-        this.restClient = builder.baseUrl(baseUrl).requestFactory(requestFactory).build();
+        // Plain Spring Framework builder: picks up Jackson from the classpath and needs
+        // no extra Boot starter.
+        this.restClient = RestClient.builder().baseUrl(baseUrl).requestFactory(requestFactory).build();
     }
 
     @Override

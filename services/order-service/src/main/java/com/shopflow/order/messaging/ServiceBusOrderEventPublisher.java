@@ -3,10 +3,10 @@ package com.shopflow.order.messaging;
 import com.azure.core.util.BinaryData;
 import com.azure.messaging.servicebus.ServiceBusMessage;
 import com.azure.messaging.servicebus.ServiceBusSenderClient;
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.ObjectMapper;
 
 public class ServiceBusOrderEventPublisher implements OrderEventPublisher {
 
@@ -31,7 +31,7 @@ public class ServiceBusOrderEventPublisher implements OrderEventPublisher {
             message.setSubject(OrderCreatedEvent.TYPE);
             sender.sendMessage(message);
             log.info("published OrderCreated orderId={}", event.orderId());
-        } catch (JsonProcessingException e) {
+        } catch (JacksonException e) {
             throw new IllegalStateException("could not serialise OrderCreated event", e);
         }
     }
