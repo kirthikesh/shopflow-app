@@ -5,6 +5,22 @@ namespace: shopflow
 resources:
 - ../../base
 
+# Dev runs on a single 2-vCPU node with no room to spare. The default rolling
+# update starts the new pod before stopping the old one, which needs spare CPU
+# and stalls here. Replace one pod at a time instead: a few seconds of downtime
+# per service, which is fine for dev.
+patches:
+- target:
+    kind: Deployment
+  patch: |-
+    - op: add
+      path: /spec/strategy
+      value:
+        type: RollingUpdate
+        rollingUpdate:
+          maxSurge: 0
+          maxUnavailable: 1
+
 # `make deploy` rewrites these with your registry and the current git commit,
 # so every deployment is traceable to the exact code it runs.
 images:
