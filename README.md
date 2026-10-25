@@ -128,6 +128,14 @@ flowchart LR
 Templates live in [`.azure-pipelines/templates`](.azure-pipelines/templates): one for the
 managed-identity sign-in and one for build, scan, SBOM and push, reused for all six services.
 
+## Problems I hit, and how I fixed them
+
+| Problem | Cause | Fix |
+|---|---|---|
+| Python tests: `ModuleNotFoundError: No module named 'app'` | Plain `pytest` doesn't put the service folder on the import path | `pyproject.toml` with `pythonpath = ["."]` in both Python services |
+| **Trivy blocked the order-service image**: critical Tomcat (CVE-2026-65182) and Spring MVC CVEs | Spring Boot 3.5 left open-source support in June 2026, so its fixes are commercial only | Upgraded to **Spring Boot 4.1** (Spring Framework 7, Tomcat 11): new `webmvc` and `flyway` starters, and Jackson 3 (`tools.jackson`) |
+| Deploy timed out: pods `Pending` on AKS | The single dev node was fully reserved, and rolling updates start the new pod before stopping the old one | Smaller CPU requests, and `maxSurge: 0` in the dev overlay |
+
 ## Design decisions
 
 - **Database per service.** The product and order services each own a database; nothing reads another service's tables.
