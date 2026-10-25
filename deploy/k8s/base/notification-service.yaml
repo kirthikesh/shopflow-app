@@ -44,7 +44,7 @@ spec:
             httpGet: { path: /ready, port: http }
             periodSeconds: 5
           resources:
-            requests: { cpu: 20m, memory: 64Mi }
+            requests: { cpu: 10m, memory: 64Mi }
             limits: { memory: 192Mi }
           volumeMounts:
             - name: tmp

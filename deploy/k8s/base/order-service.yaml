@@ -57,7 +57,7 @@ spec:
             httpGet: { path: /health/readiness, port: http }
             periodSeconds: 5
           resources:
-            requests: { cpu: 100m, memory: 384Mi }
+            requests: { cpu: 50m, memory: 384Mi }
             limits: { memory: 768Mi }
           volumeMounts:
             - name: tmp

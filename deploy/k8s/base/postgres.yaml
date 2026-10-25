@@ -41,7 +41,7 @@ spec:
               command: ["pg_isready", "-U", "shopflow"]
             periodSeconds: 5
           resources:
-            requests: { cpu: 100m, memory: 256Mi }
+            requests: { cpu: 50m, memory: 256Mi }
             limits: { memory: 512Mi }
           volumeMounts:
             - name: data

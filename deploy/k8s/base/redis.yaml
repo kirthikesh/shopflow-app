@@ -28,7 +28,7 @@ spec:
               command: ["redis-cli", "ping"]
             periodSeconds: 5
           resources:
-            requests: { cpu: 50m, memory: 64Mi }
+            requests: { cpu: 20m, memory: 64Mi }
             limits: { memory: 256Mi }
           volumeMounts:
             - name: data
