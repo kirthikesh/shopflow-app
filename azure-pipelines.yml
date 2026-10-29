@@ -1,7 +1,9 @@
 # ShopFlow application pipeline.
 #
 #   Pull request  ->  Test  ->  Build + scan (nothing is pushed)
-#   main          ->  Test  ->  Build + scan + push  ->  approval  ->  Deploy to AKS  ->  smoke test
+#   main          ->  Test  ->  Build + scan + push
+#                 ->  Release to dev   (commit tag to shopflow-gitops, Argo CD deploys, smoke test)
+#                 ->  approval  ->  Promote to prod  (same tag, same checks)
 #
 # Runs on the self-hosted agent in the hub network and signs in to Azure with the
 # agent VM's managed identity. Images are tagged with the commit they were built
@@ -115,8 +117,11 @@ stages:
             condition: always()
 
   # ---------------------------------------------------------------------------
-  # main only. Skipped quietly when the cluster is switched off (make aks-down).
-  - stage: Deploy
+  # GitOps release: main only, skipped quietly when the cluster is switched off.
+  # The pipeline never runs kubectl apply for the app. It commits the image tag
+  # to shopflow-gitops and Argo CD deploys it; then the pipeline verifies.
+  - stage: Dev
+    displayName: Release to dev
     dependsOn: Build
     condition: and(succeeded(), eq(variables.isMain, true))
     jobs:
@@ -127,14 +132,14 @@ stages:
           - bash: |
               set -euo pipefail
               az login --identity --output none
-              aks=$(az aks list -g "$(devResourceGroup)" --query "[0].name" -o tsv 2>/dev/null || true)
+              aks=$(az aks list -g "$(devResourceGroup)" --query "[?powerState.code=='Running'].name | [0]" -o tsv 2>/dev/null || true)
               echo "##vso[task.setvariable variable=name;isOutput=true]$aks"
-              [ -n "$aks" ] && echo "Cluster: $aks" || echo "No cluster running: skipping deployment."
+              [ -n "$aks" ] && echo "Cluster: $aks" || echo "No running cluster: skipping the release."
             name: aks
-            displayName: Look for the AKS cluster
+            displayName: Look for a running AKS cluster
 
-      - deployment: deploy_dev
-        displayName: Deploy to dev
+      - deployment: release_dev
+        displayName: Release to dev
         dependsOn: find_cluster
         condition: and(succeeded(), ne(dependencies.find_cluster.outputs['aks.name'], ''))
         environment: shopflow-dev
@@ -146,43 +151,29 @@ stages:
           runOnce:
             deploy:
               steps:
-                - checkout: self
-                  clean: true
+                - template: .azure-pipelines/templates/gitops-release.yml
+                  parameters:
+                    env: dev
 
-                - template: .azure-pipelines/templates/azure-login.yml
-
-                - bash: |
-                    set -euo pipefail
-                    export KUBECONFIG="$(Agent.TempDirectory)/kubeconfig"
-                    az aks get-credentials -g "$(devResourceGroup)" -n "$(aksName)" --file "$KUBECONFIG" --overwrite-existing
-                    kubelogin convert-kubeconfig -l msi
-
-                    ns=$(az servicebus namespace list -g "$(devResourceGroup)" --query "[0].name" -o tsv)
-                    export SERVICEBUS_CONNECTION_STRING=$(az servicebus namespace authorization-rule keys list \
-                      -g "$(devResourceGroup)" --namespace-name "$ns" -n shopflow-app --query primaryConnectionString -o tsv)
-
-                    make deploy ACR="$(ACR)" TAG="${BUILD_SOURCEVERSION:0:7}"
-                  displayName: Deploy (kustomize, pinned to this commit)
-
-                - bash: |
-                    set -euo pipefail
-                    export KUBECONFIG="$(Agent.TempDirectory)/kubeconfig"
-                    for _ in $(seq 1 30); do
-                      ip=$(kubectl -n shopflow get svc frontend-public -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-                      [ -n "$ip" ] && break
-                      sleep 10
-                    done
-                    [ -n "${ip:-}" ] || { echo "The shop never got a public IP"; exit 1; }
-
-                    curl -fsS --retry 12 --retry-delay 5 --retry-all-errors "http://$ip/api/health"; echo
-                    products=$(curl -fsS --retry 6 --retry-delay 5 --retry-all-errors "http://$ip/api/products" | jq length)
-                    [ "$products" -gt 0 ] || { echo "Product API returned no products"; exit 1; }
-                    echo "Smoke test passed: $products products at http://$ip"
-                    echo "##vso[task.setvariable variable=shopUrl]http://$ip"
-                  displayName: Smoke test
-
-                - bash: kubectl -n shopflow get pods -o wide
-                  displayName: Pod status
-                  condition: always()
-                  env:
-                    KUBECONFIG: $(Agent.TempDirectory)/kubeconfig
+  # ---------------------------------------------------------------------------
+  # Same image, promoted only after a person approves on the shopflow-prod
+  # environment. Nothing is rebuilt: prod gets exactly the tag dev verified.
+  - stage: Prod
+    displayName: Promote to prod
+    dependsOn: Dev
+    condition: and(succeeded(), ne(dependencies.Dev.outputs['find_cluster.aks.name'], ''))
+    variables:
+      aksName: $[ stageDependencies.Dev.find_cluster.outputs['aks.name'] ]
+    jobs:
+      - deployment: release_prod
+        displayName: Promote to prod
+        environment: shopflow-prod
+        workspace:
+          clean: all
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - template: .azure-pipelines/templates/gitops-release.yml
+                  parameters:
+                    env: prod

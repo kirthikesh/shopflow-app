@@ -1,0 +1,112 @@
+# Releases this commit to one environment, the GitOps way: the pipeline does
+# not deploy anything itself. It commits the image tag to shopflow-gitops, and
+# Argo CD (running in the cluster) rolls it out. The pipeline then waits for
+# that rollout and smoke-tests the result.
+#
+# Needs: the Secure File "shopflow-gitops-deploy" (a deploy key with write
+# access to shopflow-gitops only) and the cluster name in $(aksName).
+parameters:
+  - name: env
+    type: string
+
+steps:
+  - checkout: self
+    clean: true
+
+  - template: azure-login.yml
+
+  - task: DownloadSecureFile@1
+    name: deployKey
+    displayName: Download GitOps deploy key
+    inputs:
+      secureFile: shopflow-gitops-deploy
+
+  - bash: |
+      set -euo pipefail
+      kubeconfig="$(Agent.TempDirectory)/kubeconfig"
+      az aks get-credentials -g "$(devResourceGroup)" -n "$(aksName)" --file "$kubeconfig" --overwrite-existing
+      KUBECONFIG="$kubeconfig" kubelogin convert-kubeconfig -l msi
+      echo "##vso[task.setvariable variable=KUBECONFIG]$kubeconfig"
+    displayName: Connect to AKS (managed identity)
+
+  - bash: |
+      set -euo pipefail
+      # GitHub's published SSH host key, pinned: never trust whatever answers on first connect.
+      known_hosts="$(Agent.TempDirectory)/known_hosts"
+      echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > "$known_hosts"
+      chmod 600 "$(deployKey.secureFilePath)"
+      ssh_cmd="ssh -i $(deployKey.secureFilePath) -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$known_hosts"
+      echo "##vso[task.setvariable variable=GIT_SSH_COMMAND]$ssh_cmd"
+
+      dir="$(Agent.TempDirectory)/gitops"
+      rm -rf "$dir"
+      GIT_SSH_COMMAND="$ssh_cmd" git clone -q --depth 20 git@github.com:kirthikesh/shopflow-gitops.git "$dir"
+      git -C "$dir" config user.name "shopflow-pipeline"
+      git -C "$dir" config user.email "shopflow-pipeline@users.noreply.github.com"
+      echo "##vso[task.setvariable variable=GITOPS_DIR]$dir"
+    displayName: Clone shopflow-gitops
+
+  - bash: ./bootstrap/install.sh
+    workingDirectory: $(GITOPS_DIR)
+    displayName: Make sure Argo CD is installed
+
+  - bash: |
+      set -euo pipefail
+      sb=$(az servicebus namespace list -g "$(devResourceGroup)" \
+        --query "[?tags.app_env=='${{ parameters.env }}'].name | [0]" -o tsv)
+      [ -n "$sb" ] || { echo "No Service Bus namespace for ${{ parameters.env }}"; exit 1; }
+      export SERVICEBUS_CONNECTION_STRING=$(az servicebus namespace authorization-rule keys list \
+        -g "$(devResourceGroup)" --namespace-name "$sb" -n shopflow-app --query primaryConnectionString -o tsv)
+      NS=shopflow-${{ parameters.env }} ./deploy/k8s/create-secrets.sh
+    displayName: Secrets for ${{ parameters.env }} (from Azure, never in Git)
+
+  - bash: |
+      set -euo pipefail
+      tag="${BUILD_SOURCEVERSION:0:7}"
+      ./scripts/set-image.sh "${{ parameters.env }}" "$tag"
+      # Ask Argo CD to look at Git now instead of at its next poll.
+      kubectl -n argocd annotate application "shopflow-${{ parameters.env }}" \
+        argocd.argoproj.io/refresh=normal --overwrite >/dev/null 2>&1 || true
+    workingDirectory: $(GITOPS_DIR)
+    displayName: Release ${{ parameters.env }} → commit tag to shopflow-gitops
+
+  - bash: |
+      set -euo pipefail
+      ns="shopflow-${{ parameters.env }}"
+      tag="${BUILD_SOURCEVERSION:0:7}"
+
+      echo "Waiting for Argo CD to roll out $tag to $ns..."
+      for _ in $(seq 1 60); do
+        images=$(kubectl -n "$ns" get deploy -l part-of=shopflow \
+          -o jsonpath='{range .items[*]}{.spec.template.spec.containers[0].image}{"\n"}{end}' 2>/dev/null || true)
+        total=$(printf '%s' "$images" | grep -c . || true)
+        current=$(printf '%s\n' "$images" | grep -c ":$tag\$" || true)
+        [ "$total" -eq 6 ] && [ "$current" -eq 6 ] && break
+        echo "  $current/6 services on $tag"
+        sleep 10
+      done
+      [ "${current:-0}" -eq 6 ] || { echo "Argo CD did not apply $tag in time"; kubectl -n argocd get applications; exit 1; }
+      kubectl -n "$ns" rollout status deploy --timeout=8m
+      kubectl -n argocd get application "shopflow-${{ parameters.env }}" \
+        -o jsonpath='{"Argo CD: "}{.status.sync.status}{", "}{.status.health.status}{"\n"}'
+    displayName: Wait for Argo CD rollout
+
+  - bash: |
+      set -euo pipefail
+      ns="shopflow-${{ parameters.env }}"
+      for _ in $(seq 1 30); do
+        ip=$(kubectl -n "$ns" get svc frontend-public -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+        [ -n "$ip" ] && break
+        sleep 10
+      done
+      [ -n "${ip:-}" ] || { echo "The shop never got a public IP"; exit 1; }
+
+      curl -fsS --retry 12 --retry-delay 5 --retry-all-errors "http://$ip/api/health"; echo
+      products=$(curl -fsS --retry 6 --retry-delay 5 --retry-all-errors "http://$ip/api/products" | jq length)
+      [ "$products" -gt 0 ] || { echo "Product API returned no products"; exit 1; }
+      echo "Smoke test passed on ${{ parameters.env }}: $products products at http://$ip"
+    displayName: Smoke test ${{ parameters.env }}
+
+  - bash: kubectl -n "shopflow-${{ parameters.env }}" get pods -o wide
+    displayName: Pod status
+    condition: always()

@@ -100,11 +100,12 @@ make test               # everything
 make test-order         # one service
 ```
 
-## CI/CD
+## CI/CD and GitOps
 
 [`azure-pipelines.yml`](azure-pipelines.yml) runs in Azure DevOps on a self-hosted agent inside the
-Azure hub network, and signs in to Azure as that VM's managed identity. No Azure credential is stored
-in Azure DevOps.
+Azure hub network, and signs in to Azure as that VM's managed identity. The pipeline **never deploys
+the app itself**: it commits the image tag to [shopflow-gitops](https://github.com/kirthikesh/shopflow-gitops),
+and **Argo CD** in the cluster rolls it out.
 
 ```mermaid
 flowchart LR
@@ -112,21 +113,26 @@ flowchart LR
     MAIN([push to main]) --> T
     T[Test<br/>6 services, each in<br/>its own toolchain container] --> B[Build + Trivy scan<br/>SBOM per image]
     B -->|main only| P[(Push to ACR<br/>tag = commit SHA)]
-    P --> A{Approval<br/>shopflow-dev}
-    A --> D[Deploy to AKS<br/>kustomize, image pinned to commit]
-    D --> S[Smoke test<br/>/api/health, /api/products]
+    P --> D[Commit tag to<br/>gitops envs/dev]
+    D -->|Argo CD| DS[dev rollout +<br/>smoke test]
+    DS --> A{Approval<br/>shopflow-prod}
+    A --> PR2[Commit same tag to<br/>gitops envs/prod]
+    PR2 -->|Argo CD| PS[prod rollout +<br/>smoke test]
 ```
 
-| Stage | What it checks |
+| Stage | What it does |
 |---|---|
 | Test | ruff and pytest (Python), Maven tests (Java), `go vet` and `go test`, Node tests, Next.js type check and production build |
-| Build | Each image is scanned with Trivy. The build **fails on any CRITICAL vulnerability that has a fix**; every HIGH and CRITICAL finding is published to the Tests tab, and a CycloneDX SBOM per image is kept as a build artifact |
-| Push | Only from `main`. Pull requests build and scan but never publish an image |
-| Deploy | Waits for approval on the `shopflow-dev` environment. Skipped automatically when the cluster is switched off to save money |
-| Smoke test | Waits for the public IP, then calls the shop's health endpoint and product API through the real load balancer |
+| Build | Each image is scanned with Trivy. The build **fails on any CRITICAL vulnerability that has a fix**; every HIGH and CRITICAL finding is published to the Tests tab, and a CycloneDX SBOM per image is kept as a build artifact. Pushed only from `main` |
+| Release to dev | Creates the namespace's secrets from Azure, commits the tag to `envs/dev`, waits until Argo CD has all six services on it, then smoke-tests through the real load balancer |
+| Promote to prod | Waits for approval on `shopflow-prod`, then does the same for `envs/prod` with the **same tag**: nothing is rebuilt |
 
-Templates live in [`.azure-pipelines/templates`](.azure-pipelines/templates): one for the
-managed-identity sign-in and one for build, scan, SBOM and push, reused for all six services.
+Both release stages are skipped automatically when the cluster is switched off. The only stored
+credential is a **deploy key that can write to shopflow-gitops and nothing else**; Azure access is the
+agent's managed identity.
+
+Templates live in [`.azure-pipelines/templates`](.azure-pipelines/templates): managed-identity sign-in,
+build-scan-push (reused for all six services) and the GitOps release (reused for both environments).
 
 ## Problems I hit, and how I fixed them
 
@@ -153,7 +159,7 @@ shopflow-app/
 ├── .azure-pipelines/templates/
 ├── docker-compose.yml        local stack
 ├── Makefile                  make up / test / deploy
-├── deploy/k8s/               Kustomize base and dev overlay
+├── deploy/k8s/               create-secrets.sh (manifests live in shopflow-gitops)
 ├── local/
 │   ├── postgres/init.sql     creates one database per service
 │   └── servicebus/config.json  queue, topic and subscriptions for the emulator
@@ -168,7 +174,7 @@ shopflow-app/
 
 Related repositories:
 - [`shopflow-infra`](https://github.com/kirthikesh/shopflow-infra): Terraform landing zone, Ansible, infrastructure pipeline
-- `shopflow-gitops` (Phase 6): Helm charts and environment config
+- [`shopflow-gitops`](https://github.com/kirthikesh/shopflow-gitops): Helm chart, per-environment values, Argo CD
 
 ## Roadmap
 
@@ -178,7 +184,7 @@ Related repositories:
 - [x] **Phase 4:** Ansible: hardened jump box and self-hosted Azure DevOps agent
 - [x] **Phase 5:** Azure DevOps pipelines: templates, Trivy scanning, SBOMs, approvals, managed-identity auth
 - [ ] Still to come from Phases 3–5: private API server, ingress with cert-manager, image signing
-- [ ] **Phase 6:** GitOps CD: multiple environments, canary releases
+- [x] **Phase 6:** GitOps CD with Argo CD: dev and prod, approval-gated promotion (canary releases still to come)
 - [ ] **Phase 7:** Security: Key Vault, Kyverno, Defender for Containers, Azure Policy
 - [ ] **Phase 8:** Observability: OpenTelemetry tracing, Grafana, SLOs, alerting
 - [ ] **Phase 9:** Resilience: KEDA, k6 load tests, chaos testing, Velero DR

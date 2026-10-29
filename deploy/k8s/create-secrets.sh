@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Creates the shopflow-secrets Kubernetes secret. Values never touch git.
+# Creates the shopflow-secrets Kubernetes secret in one environment's namespace.
+# Values never touch Git: Argo CD deploys everything else from shopflow-gitops,
+# but the secret is created here, by the pipeline.
+#   NS                            target namespace (default shopflow-dev)
 #   POSTGRES_PASSWORD             generated once, then kept (changing it would lock out the existing database)
 #   SERVICEBUS_CONNECTION_STRING  taken from the environment if set (the pipeline does this),
 #                                 otherwise read from the shopflow-infra Terraform outputs
@@ -7,9 +10,14 @@
 set -euo pipefail
 
 INFRA_DIR="${INFRA_DIR:-../shopflow-infra}"
-NS=shopflow
+NS="${NS:-shopflow-dev}"
 
 kubectl get namespace "$NS" >/dev/null 2>&1 || kubectl create namespace "$NS"
+# Pod Security Standards, same as Argo CD sets: Postgres needs "baseline".
+kubectl label namespace "$NS" --overwrite \
+  pod-security.kubernetes.io/enforce=baseline \
+  pod-security.kubernetes.io/warn=restricted \
+  pod-security.kubernetes.io/audit=restricted >/dev/null
 
 SB_CONN="${SERVICEBUS_CONNECTION_STRING:-$(terraform -chdir="$INFRA_DIR/envs/dev" output -raw servicebus_connection_string)}"
 
